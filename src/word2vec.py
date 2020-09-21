@@ -5,7 +5,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+
 import data
+
+
 
 # Word2Vec - SkipGram version
 #  
@@ -29,47 +32,62 @@ class Word2Vec(nn.Module):
         x = F.relu(self.embedding(x))
         return F.softmax(self.output(x), dim=0)
 
-def create_skip_grams():
-    
 
-    
 def main():
     # Hyper-parameters
-    embedding_size = 100
+    embedding_size = 30
     window_size = 2
     batch_size = 64
     num_epochs = 5
-    learning_rate=0.01
-    momentum=0.9
+    learning_rate=0.001
 
-    # Create skip-grams
-    sentences = data.get_sentences_from_korp_dataset
+    # Setup sequence of words and the vocabulary
+    word_sequence = data.word_sequence_from_korp_dataset("../dataset/flashback_emails.csv")
+    vocab = list(set(word_sequence))
+    vocab_size = len(vocab)
 
-    dataset = data.KorpDataset("../dataset/flashback_emails.csv", window_size);
-    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-     # NOTE(alexander): embedding size should be smaller, otherwise what's the point just one-hot encode
-    assert(embedding_size < dataset.vocab_size)
+    # Make skip-grams by combining center word and surrounding context words
+    skip_grams = list()
+    for i in range(1, len(word_sequence) - 1):
+        center_word = vocab.index(word_sequence[i])
+        for j in range(i - window_size, i + window_size):
+            if j != i and j >= 0 and j < len(word_sequence):
+                context_word = vocab.index(word_sequence[j])
+                skip_grams.append((center_word, context_word))
+
+    print("Some skip-gram examples:", [(vocab[i], vocab[j]) for (i, j) in skip_grams[:10]])
+
+    # NOTE(alexander): embedding size should be smaller to get meaningful representation
+    assert(embedding_size < vocab_size)
     
     # Create the word2vec model, optimizer and criterion
-    model = Word2Vec(dataset.vocab_size, embedding_size)
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
-    criterion = nn.MSELoss()
+    model = Word2Vec(vocab_size, embedding_size)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.CrossEntropyLoss()
 
     # Train the model
-    for epoch in range(num_epochs):
-        epoch_loss = 0.0
+    for epoch in range(5000):
+        # Create a mini batch
+        input_batch = list()
+        target_batch = list()
+        indices_batch = np.random.choice(range(len(skip_grams)), batch_size, replace=False)
+        for i in indices_batch:
+            input_batch.append(np.eye(vocab_size)[skip_grams[i][0]]) # center word
+            target_batch.append(skip_grams[i][1]) # context word
 
-        for batch_num, (inputs, targets) in enumerate(train_loader):
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward();
-            optimizer.step();
-            epoch_loss += loss.item()
+        inputs = torch.Tensor(input_batch);
+        targets = torch.LongTensor(target_batch);
 
-        print('Epoch: %d - loss: %.3f' %
-              (epoch + 1, epoch_loss / len(train_loader)))
-    print('Finished Training')            
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward();
+        optimizer.step();
+        epoch_loss = loss.item()
+
+        if (epoch + 1) % 100 == 0:
+            print("Epoch: %d - loss: %.6f" % (epoch + 1, epoch_loss))
+    print("Finished Training")
 
 if __name__== "__main__":
     main()
