@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-
 import data
 
 
@@ -29,8 +28,18 @@ class Word2Vec(nn.Module):
         self.output = nn.Linear(embedding_size, vocab_size, bias=False)
 
     def forward(self, x):
-        x = F.relu(self.embedding(x))
-        return F.softmax(self.output(x), dim=0)
+        x = self.embedding(x)
+        return self.output(x)
+
+
+def cuda_device_if_available():
+    """Returns the CUDA device if it is available, 
+    if no then the CPU device is returned instead.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    print("Training on: " + device_name)
+    return device
 
 
 def main():
@@ -59,11 +68,19 @@ def main():
 
     # NOTE(alexander): embedding size should be smaller to get meaningful representation
     assert(embedding_size < vocab_size)
-    
+
+
+    # If CUDA support use that
+    device = cuda_device_if_available()
+
     # Create the word2vec model, optimizer and criterion
     model = Word2Vec(vocab_size, embedding_size)
+    model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss()
+
+    lowest_loss = 1000
+    filename = "checkpoint.pt"
 
     # Train the model
     for epoch in range(5000):
@@ -75,8 +92,10 @@ def main():
             input_batch.append(np.eye(vocab_size)[skip_grams[i][0]]) # center word
             target_batch.append(skip_grams[i][1]) # context word
 
-        inputs = torch.Tensor(input_batch);
-        targets = torch.LongTensor(target_batch);
+        inputs = torch.Tensor(input_batch)
+        inputs = inputs.to(device)
+        targets = torch.LongTensor(target_batch)
+        targets = targets.to(device)
 
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -87,6 +106,11 @@ def main():
 
         if (epoch + 1) % 100 == 0:
             print("Epoch: %d - loss: %.6f" % (epoch + 1, epoch_loss))
+
+        if epoch_loss < lowest_loss:
+            torch.save(model.embedding.state_dict(), filename)
+            lowest_loss = epoch_loss
+            print("Reached lower loss of %.6f at epoch %d saving to %s" % (lowest_loss, epoch + 1, filename))
     print("Finished Training")
 
 if __name__== "__main__":
