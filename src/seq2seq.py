@@ -3,27 +3,25 @@ import numpy as np
 import random
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 class Seq2Seq(nn.Module):
     def __init__(self, embedding_size, hidden_size):
         super(Seq2Seq, self).__init__()
-        self.enc_cell = nn.RNN(input_size=embedding_size,
-                               hidden_size=hidden_size, # connects to dec_cell and the next time step (aka. token)
-                               num_layers=2,
-                               dropout=0.5) # dropout means only training certain neurons at a time.
-        self.dec_cell = nn.RNN(input_size=embedding_size, 
-                               hidden_size=hidden_size, 
-                               num_layers=2, 
-                               dropout=0.5)
+        self.enc_cell = nn.GRU(input_size=embedding_size, hidden_size=hidden_size)
+        self.enc_dropout = nn.Dropout(0.5)
+        self.dec_cell = nn.GRU(input_size=embedding_size, hidden_size=hidden_size)
+        self.dec_dropout = nn.Dropout(0.5)
         self.fc = nn.Linear(hidden_size, embedding_size)
 
     def forward(self, enc_inputs, enc_hidden, dec_inputs):
-        enc_inputs = enc_inputs.transpose(0, 1)
-        dec_inputs = dec_inputs.transpose(0, 1)
+        enc_inputs = self.enc_dropout(enc_inputs.transpose(0, 1))
+        dec_inputs = self.dec_dropout(dec_inputs.transpose(0, 1))
 
         _, enc_state = self.enc_cell(enc_inputs, enc_hidden)
         dec_outputs, _ = self.dec_cell(dec_inputs, enc_state)
+
         return self.fc(dec_outputs)
 
 def extract_word_embeddings(nlp, keywords, text):
@@ -31,12 +29,18 @@ def extract_word_embeddings(nlp, keywords, text):
     for entry in text:
         doc = nlp(entry)
         vectors = []
-        for i, token in enumerate(doc):
-            if token.text == "<" and doc[i + 2].text == ">": # HACK(alexander): must be a better way to do this
+        i = 0
+        while i < len(doc):
+            if doc[i].text == "<" and doc[i + 2].text == ">":
                 if ("<" + doc[i + 1].text + ">") in keywords:
                     vectors.append(keywords["<" + doc[i + 1].text + ">"])
+                    i += 3
                     continue
-            vectors.append(doc.vector)
+            if doc[i].is_oov:
+                nlp.vocab.set_vector(doc[i].text, np.random.uniform(-10, 10, (300,)))
+                print(doc[i].text, "is out-of-vocabulary")
+            vectors.append(doc[i].vector)
+            i += 1
         result.append(vectors)
     return result
                 
@@ -44,10 +48,11 @@ def correct_vector_length(vectors, target_length, pad_vector):
     result = []
     for v in vectors:
         while len(v) > target_length: # Split into two entries
-            sub = v[:len(v)]
-            v = v[len(v) + 1:]
-            result.append(v)
-
+            sub = v[:target_length]
+            v = v[target_length + 1:]
+            result.append(sub)
+        if len(v) == 0: 
+            continue
         if len(v) == target_length: # Perfect this one is done
             result.append(v)
         else: # Add padding to reach the targe length
@@ -60,9 +65,9 @@ if __name__ == "__main__":
     # Hyper-parameters (tunable parameters to improve training)
     lr_rate = 0.001 # factor of how much the network weights should change per training batch.
     num_epochs = 5000 # number of times to train (i.e. change weights) the model.
-    num_steps = 20 # the number of words that can appear in sequence.
+    num_steps = 10 # the number of words that can appear in sequence.
     embedding_size = 300 # the size of vectors, spaCy uses 300 dimensions for their embeddings.
-    hidden_size = 128 # size of the hidden state in RNN, chosen arbitrarily.
+    hidden_size = 512 # size of the hidden state in RNN, chosen arbitrarily.
 
     # Find device, 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,16 +75,15 @@ if __name__ == "__main__":
     
     # Seting up the dataset
     nlp = spacy.load("en_core_web_md")
-    dataset_inputs  = ["<START> Email alemen-6@student.ltu.se saying \"Hello world!\". <END>",
-                       "<START> Send email to my friend, I'm about 15 minutes late for school. <END>"
-                       "<START> I'm about 15 minutes late for work, send email to my colleagues <END>"]
-    dataset_outputs = ["<COMMAND> email <TO> alemen-6@student.ltu.se <BODY> Hello world! <END>",
-                       "<COMMAND> email <TO> my friend <BODY> I'm about 15 minutes late for school. <END>",
-                       "<COMMAND> email <TO> my colleagues <BODY> I'm about 15 minutes late for work. <END>"]
+    dataset_inputs  = ["Email alemen-6@student.ltu.se saying Hello world.",
+                       "Send email to my friend, I am about 15 minutes late for school."
+                       "I am about 15 minutes late for work, send email to my colleagues"]
+    dataset_outputs = ["email <TO> alemen-6@student.ltu.se <BODY> Hello world!",
+                       "email <TO> my friend <BODY> I am about 15 minutes late for school.",
+                       "email <TO> my colleagues <BODY> I am about 15 minutes late for work."]
 
     # Add custom vectors for tagging stuff
     keywords = {"<START>": np.random.uniform(-1, 1, (300,)),
-                "<COMMAND>": np.random.uniform(-1, 1, (300,)),
                 "<END>": np.random.uniform(-1, 1, (300,)),
                 "<TO>": np.random.uniform(-1, 1, (300,)),
                 "<BODY>": np.random.uniform(-1, 1, (300,)),
@@ -88,22 +92,54 @@ if __name__ == "__main__":
         nlp.vocab.set_vector(word, vector)
     # TODO(alexander): These needs to be stored so we can interpret future uses of this model
 
+
+    # Separate dataset outputs (inputs to decoder) and its target
+    dataset_targets = []
+    for i in range(len(dataset_outputs)):
+        dataset_targets.append(dataset_outputs[i] + " <END>");
+        dataset_outputs[i] = "<START> " + dataset_outputs[i]
+    
     # Convert sentences into vectors of words
     input_vectors = extract_word_embeddings(nlp, keywords, dataset_inputs)
+    output_vectors = extract_word_embeddings(nlp, keywords, dataset_outputs)
     target_vectors = extract_word_embeddings(nlp, keywords, dataset_targets)
 
     # Make sure that each sentence have num_steps vectors, add padding if needed
     # NOTE: the neural network requires sequences to have the same dimensions, strict requirement.
     input_vectors = correct_vector_length(input_vectors, num_steps, keywords["<PAD>"])
+    output_vectors = correct_vector_length(output_vectors, num_steps, keywords["<PAD>"])
     target_vectors = correct_vector_length(target_vectors, num_steps, keywords["<PAD>"])
 
-    # Output is the target shifted by one
-    output_vectors = []
-    # TODO(alexander): implement this somehow :)
-    # for i, v in enumerate(target_vectors):
-        # output_vectors.append(v[1:])
-        # if i < len(target_vectors) - 1:
-            # output_vectors[i].append(output_
+    # print("inputs: ", end='')
+    # result = ""
+    # for ent in input_vectors:
+        # for v in ent: 
+            # keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
+            # for k in keys:
+                # text = nlp.vocab[k[0]].text
+                # result += text + " "
+    # print(result.encode("utf-8"))
+        
+    # print("outputs: ", end='')
+    # result = ""
+    # for ent in output_vectors:
+        # for v in ent: 
+            # keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
+            # for k in keys:
+                # text = nlp.vocab[k[0]].text
+                # result += text + " "
+    # print(result.encode("utf-8"))
+        
+    # print("targets: ", end='')
+    # result = ""
+    # for ent in target_vectors:
+        # for v in ent: 
+            # keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
+            # for k in keys:
+                # text = nlp.vocab[k[0]].text
+                # result += text + " "
+    # print(result.encode("utf-8"))
+    # exit(0)
 
     # Setting up the model (criterion/optimizare are also hyper-parameters)
     model = Seq2Seq(embedding_size, hidden_size)
@@ -114,21 +150,22 @@ if __name__ == "__main__":
     filename = "seq2seq_checkpoint.pt" # used for saving/loading trained models
     if True:
         print("Training started")
-        lowest_loss = 1000
+        lowest_loss = 10
         model = model.to(device)
         pbar = tqdm(range(num_epochs))
         for epoch in pbar:
+            l = len(input_vectors)
             # Pick a random sample from the training set
-            idx = random.randint(0, len(input_vectors) - 1)
-            inputs = torch.FloatTensor([input_vectors[idx]]).to(device)
-            hidden = torch.FloatTensor(torch.zeros(2, 1, hidden_size)).to(device)
-            outputs = torch.FloatTensor([output_vector[idx]])
-            targets = torch.FloatTensor([target_vectors[idx]]).to(device)
+            # idx = epoch % len(input_vectors)
+            inputs = torch.FloatTensor(input_vectors[:l]).to(device)
+            hidden = torch.FloatTensor(torch.zeros(1, l, hidden_size)).to(device)
+            outputs = torch.FloatTensor(output_vectors[:l]).to(device)
+            targets = torch.FloatTensor(target_vectors[:l]).to(device)
 
             optimizer.zero_grad() # resets the gradiens from previous epoch
-            outputs = model(inputs, hidden, targets)
-            outputs = outputs.transpose(0, 1)
-            loss = criterion(outputs, targets)
+            predictions = model(inputs, hidden, outputs)
+            predictions = predictions.transpose(0, 1)
+            loss = criterion(predictions, targets)
             loss.backward();
             optimizer.step();
             epoch_loss = loss.item()
@@ -154,36 +191,58 @@ if __name__ == "__main__":
         model.eval(); # Ignore dropout
         with torch.no_grad(): # Ignore gradient calculations, lower memory footprint
             # test = input("> ").split(' ')
-            # test_text = "Send an email with information about my project to my group members"
-            # test_text = "Email alemen-6@student.ltu.se saying \"Hello world!\"."
-            test_text = "Send email to my friend, I'm about 15 minutes late for school."
+            test_text = ["Send an email with information about my project to my group members",
+                         "Email alemen-6@student.ltu.se saying Hello world!.",
+                         "Send email to my friend, I'm about 15 minutes late for school."]
             print("input:", test_text)
 
-            test_text = "<START> " + test_text + " <END>"
-            # The output needs to be fed into the network, just give it a bunch of padding tokens.
-            # HACK(alexander): kind of works but should rely on spacys nlp instead.
-            pad_text = "<PAD> "*(len(test_text.split(' ')))
-            pad_text = "<START> " + pad_text + " <END>"
-
             # Preprocess
-            test_vectors = extract_word_embeddings(nlp, keywords, [test_text])
-            pad_vectors = extract_word_embeddings(nlp, keywords, [pad_text])
+            test_vectors = extract_word_embeddings(nlp, keywords, test_text)
+            max_len = 0
+            for v in test_vectors:
+                if len(v) > max_len:
+                    max_len = len(v)
+            print("Max length:", max_len)
+
+            for v in test_vectors:
+                while len(v) < max_len:
+                    v.append(keywords["<PAD>"])
+
+            pad_text = ["<START>" + " <PAD>"*(max_len - 1),
+                        "<START>" + " <PAD>"*(max_len - 1),
+                        "<START>" + " <PAD>"*(max_len - 1)]
+            pad_vectors = extract_word_embeddings(nlp, keywords, pad_text)
 
             test_vectors = correct_vector_length(test_vectors, num_steps, keywords["<PAD>"])
             pad_vectors = correct_vector_length(pad_vectors, num_steps, keywords["<PAD>"])
 
             # Create tensors for pytorch
-            inputs = torch.FloatTensor([test_vectors[0]]).to(device)
-            hidden = torch.FloatTensor(torch.zeros(2, 1, hidden_size)).to(device)
-            padding = torch.FloatTensor([input_vectors[0]]).to(device)
+            inputs = torch.FloatTensor(test_vectors).to(device)
+            hidden = torch.FloatTensor(torch.zeros(1, len(test_vectors), hidden_size)).to(device)
+            padding = torch.FloatTensor(pad_vectors).to(device)
 
-            outputs = model(inputs, hidden, padding).cpu()
+            print("output: ", end='')
+            found_end_token = False;
+            tries = 1
+            while not found_end_token and tries > 0:
+                tries -= 1
+                outputs = model(inputs, hidden, padding).cpu()
 
-            result = ""
-            for v in outputs:
-                outputs = np.reshape(v.numpy(), (1, 300))
-                keys, _, _ = nlp.vocab.vectors.most_similar(v)
-                for k in keys:
-                    result += nlp.vocab[k[0]].text + " "
-            print("output:", result)
+                # Next it remove start
+                # pad_text = "<PAD>"
+                # pad_vectors = extract_word_embeddings(nlp, keywords, [pad_text])
+                # pad_vectors = correct_vector_length(pad_vectors, num_steps, keywords["<PAD>"])
+                # padding = torch.FloatTensor([pad_vectors[0]]).to(device)
+
+                result = ""
+                for v in outputs:
+                    keys, _, _ = nlp.vocab.vectors.most_similar(v)
+                    for k in keys:
+                        text = nlp.vocab[k[0]].text
+                        result += text + " "
+                        if text == "<END>":
+                            found_end_token = True;
+                            break;
+                print(result.encode("utf-8"), end='')
+            print("")
     print("Exiting the program")
