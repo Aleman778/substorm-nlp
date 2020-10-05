@@ -16,13 +16,35 @@ class Seq2Seq(nn.Module):
         self.fc = nn.Linear(hidden_size, embedding_size)
 
     def forward(self, enc_inputs, enc_hidden, dec_inputs):
+        batch_size = enc_inputs.shape[1]
+        num_steps = enc_inputs.shape[0]
         enc_inputs = self.enc_dropout(enc_inputs.transpose(0, 1))
         dec_inputs = self.dec_dropout(dec_inputs.transpose(0, 1))
 
         _, enc_state = self.enc_cell(enc_inputs, enc_hidden)
         dec_outputs, _ = self.dec_cell(dec_inputs, enc_state)
+        dec_outputs = dec_outputs.transpose(0, 1)
 
-        return self.fc(dec_outputs)
+        outputs = torch.zeros(num_steps, batch_size, embedding_size).to(device)
+        for i in range(num_steps):
+            outputs[i] = self.fc(dec_outputs[i])
+        return outputs
+
+    def forward_without_teacher(self, enc_inputs, enc_hidden):
+        batch_size = enc_inputs.shape[0]
+        num_steps = enc_inputs.shape[1]
+        enc_inputs = self.enc_dropout(enc_inputs.transpose(0, 1))
+        _, enc_state = self.enc_cell(enc_inputs, enc_hidden)
+
+        dec_inputs = torch.FloatTensor([[keywords["<START>"]]*batch_size]).to(device)
+        # dec_inputs = dec_inputs.transpose(0, 1)
+
+        outputs = torch.zeros(num_steps, batch_size, embedding_size).to(device)
+        for i in range(num_steps):
+            dec_outputs, enc_state = self.dec_cell(dec_inputs, enc_state)
+            outputs[i] = self.fc(dec_outputs)
+            dec_inputs = outputs[i].unsqueeze(0)
+        return outputs
 
 def extract_word_embeddings(nlp, keywords, text):
     result = []
@@ -64,7 +86,7 @@ def correct_vector_length(vectors, target_length, pad_vector):
 if __name__ == "__main__":
     # Hyper-parameters (tunable parameters to improve training)
     lr_rate = 0.001 # factor of how much the network weights should change per training batch.
-    num_epochs = 5000 # number of times to train (i.e. change weights) the model.
+    num_epochs = 500 # number of times to train (i.e. change weights) the model.
     num_steps = 10 # the number of words that can appear in sequence.
     embedding_size = 300 # the size of vectors, spaCy uses 300 dimensions for their embeddings.
     hidden_size = 512 # size of the hidden state in RNN, chosen arbitrarily.
@@ -113,31 +135,31 @@ if __name__ == "__main__":
     # print("inputs: ", end='')
     # result = ""
     # for ent in input_vectors:
-        # for v in ent: 
-            # keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
-            # for k in keys:
-                # text = nlp.vocab[k[0]].text
-                # result += text + " "
+    #     for v in ent: 
+    #         keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
+    #         for k in keys:
+    #             text = nlp.vocab[k[0]].text
+    #             result += text + " "
     # print(result.encode("utf-8"))
         
     # print("outputs: ", end='')
     # result = ""
     # for ent in output_vectors:
-        # for v in ent: 
-            # keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
-            # for k in keys:
-                # text = nlp.vocab[k[0]].text
-                # result += text + " "
+    #     for v in ent: 
+    #         keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
+    #         for k in keys:
+    #             text = nlp.vocab[k[0]].text
+    #             result += text + " "
     # print(result.encode("utf-8"))
         
     # print("targets: ", end='')
     # result = ""
     # for ent in target_vectors:
-        # for v in ent: 
-            # keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
-            # for k in keys:
-                # text = nlp.vocab[k[0]].text
-                # result += text + " "
+    #     for v in ent: 
+    #         keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
+    #         for k in keys:
+    #             text = nlp.vocab[k[0]].text
+    #             result += text + " "
     # print(result.encode("utf-8"))
     # exit(0)
 
@@ -164,7 +186,6 @@ if __name__ == "__main__":
 
             optimizer.zero_grad() # resets the gradiens from previous epoch
             predictions = model(inputs, hidden, outputs)
-            predictions = predictions.transpose(0, 1)
             loss = criterion(predictions, targets)
             loss.backward();
             optimizer.step();
@@ -226,7 +247,7 @@ if __name__ == "__main__":
             tries = 1
             while not found_end_token and tries > 0:
                 tries -= 1
-                outputs = model(inputs, hidden, padding).cpu()
+                outputs = model.forward_without_teacher(inputs, hidden).cpu()
 
                 # Next it remove start
                 # pad_text = "<PAD>"
@@ -236,13 +257,15 @@ if __name__ == "__main__":
 
                 result = ""
                 for v in outputs:
-                    keys, _, _ = nlp.vocab.vectors.most_similar(v)
+                    keys, _, _ = nlp.vocab.vectors.most_similar(v, n=3)
                     for k in keys:
                         text = nlp.vocab[k[0]].text
-                        result += text + " "
                         if text == "<END>":
                             found_end_token = True;
                             break;
+                        result += text + " "
+                        result += "(or " + nlp.vocab[k[1]].text + ", "
+                        result += nlp.vocab[k[2]].text + ") "
                 print(result.encode("utf-8"), end='')
             print("")
     print("Exiting the program")
