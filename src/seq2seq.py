@@ -30,13 +30,13 @@ class Seq2Seq(nn.Module):
             outputs[i] = self.fc(dec_outputs[i])
         return outputs
 
-    def forward_without_teacher(self, enc_inputs, enc_hidden):
+    def forward_without_teacher(self, enc_inputs, enc_hidden, first_dec_input):
         batch_size = enc_inputs.shape[0]
         num_steps = enc_inputs.shape[1]
         enc_inputs = self.enc_dropout(enc_inputs.transpose(0, 1))
         _, enc_state = self.enc_cell(enc_inputs, enc_hidden)
 
-        dec_inputs = torch.FloatTensor([[keywords["<START>"]]*batch_size]).to(device)
+        dec_inputs = torch.FloatTensor([[first_dec_input]*batch_size]).to(device)
         # dec_inputs = dec_inputs.transpose(0, 1)
 
         outputs = torch.zeros(num_steps, batch_size, embedding_size).to(device)
@@ -61,6 +61,9 @@ def extract_word_embeddings(nlp, keywords, text):
             if doc[i].is_oov:
                 nlp.vocab.set_vector(doc[i].text, np.random.uniform(-10, 10, (300,)))
                 print(doc[i].text, "is out-of-vocabulary")
+            if not doc[i].has_vector:
+                nlp.vocab.set_vector(doc[i].text, np.random.uniform(-10, 10, (300,)))
+                print(doc[i].text, "has no vector")
             vectors.append(doc[i].vector)
             i += 1
         result.append(vectors)
@@ -86,7 +89,7 @@ def correct_vector_length(vectors, target_length, pad_vector):
 if __name__ == "__main__":
     # Hyper-parameters (tunable parameters to improve training)
     lr_rate = 0.001 # factor of how much the network weights should change per training batch.
-    num_epochs = 5000 # number of times to train (i.e. change weights) the model.
+    num_epochs = 500 # number of times to train (i.e. change weights) the model.
     num_steps = 10 # the number of words that can appear in sequence.
     embedding_size = 300 # the size of vectors, spaCy uses 300 dimensions for their embeddings.
     hidden_size = 512 # size of the hidden state in RNN, chosen arbitrarily.
@@ -98,16 +101,23 @@ if __name__ == "__main__":
     # Seting up the dataset
     nlp = spacy.load("en_core_web_md")
     dataset_inputs  = ["Email alemen-6@student.ltu.se saying Hello world.",
-                       "Send email to my friend, I am about 15 minutes late for school."
-                       "I am about 15 minutes late for work, send email to my colleagues"]
+                       "Send email to my friend, I'm sick I cannot come to school.",
+                       "I am about 15 minutes late for work, send email to my colleagues.",
+                       "Remind me tomorrow at 8am to take out the trash.",
+                       "I have an appointment with the dentist next week on monday at 5pm.",
+                       "Schedule meeting on friday with my team."]
     dataset_outputs = ["email <TO> alemen-6@student.ltu.se <BODY> Hello world!",
-                       "email <TO> my friend <BODY> I am about 15 minutes late for school.",
-                       "email <TO> my colleagues <BODY> I am about 15 minutes late for work."]
+                       "email <TO> my friend <BODY> I'm sick I cannot come to school.",
+                       "email <TO> my colleagues <BODY> I am about 15 minutes late for work.",
+                       "remind <TO> me <WHEN> 8am tomorrow <BODY> Take out the trash.",
+                       "remind <TO> me <WHEN> next week, monday, 5pm <BODY> Dentist appointment.",
+                       "remind <TO> my team <WHEN> friday <BODY> Meeting."]
 
     # Add custom vectors for tagging stuff
     keywords = {"<START>": np.random.uniform(-1, 1, (300,)),
                 "<END>": np.random.uniform(-1, 1, (300,)),
                 "<TO>": np.random.uniform(-1, 1, (300,)),
+                "<WHEN>": np.random.uniform(-1, 1, (300,)),
                 "<BODY>": np.random.uniform(-1, 1, (300,)),
                 "<PAD>": np.random.uniform(-1, 1, (300,))}
     for word, vector in keywords.items():
@@ -131,37 +141,6 @@ if __name__ == "__main__":
     input_vectors = correct_vector_length(input_vectors, num_steps, keywords["<PAD>"])
     output_vectors = correct_vector_length(output_vectors, num_steps, keywords["<PAD>"])
     target_vectors = correct_vector_length(target_vectors, num_steps, keywords["<PAD>"])
-
-    # print("inputs: ", end='')
-    # result = ""
-    # for ent in input_vectors:
-    #     for v in ent: 
-    #         keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
-    #         for k in keys:
-    #             text = nlp.vocab[k[0]].text
-    #             result += text + " "
-    # print(result.encode("utf-8"))
-        
-    # print("outputs: ", end='')
-    # result = ""
-    # for ent in output_vectors:
-    #     for v in ent: 
-    #         keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
-    #         for k in keys:
-    #             text = nlp.vocab[k[0]].text
-    #             result += text + " "
-    # print(result.encode("utf-8"))
-        
-    # print("targets: ", end='')
-    # result = ""
-    # for ent in target_vectors:
-    #     for v in ent: 
-    #         keys, _, _ = nlp.vocab.vectors.most_similar(v.reshape(1, v.shape[0]))
-    #         for k in keys:
-    #             text = nlp.vocab[k[0]].text
-    #             result += text + " "
-    # print(result.encode("utf-8"))
-    # exit(0)
 
     # Setting up the model (criterion/optimizare are also hyper-parameters)
     model = Seq2Seq(embedding_size, hidden_size)
@@ -207,64 +186,57 @@ if __name__ == "__main__":
 
     # Testing the model
     if True:
-        print("Testing the model")
+        print("Testing the model:")
+        examples = ["Send email to my friend saying I am sick.",
+                    "Remind me to join zoom meeting at 6pm today.",
+                    "Set alarm tomorrow at 8am.",
+                    "I'm late for work today notify my colleagues."]
+        
         model = model.to(device)
         model.eval(); # Ignore dropout
         with torch.no_grad(): # Ignore gradient calculations, lower memory footprint
-            # test = input("> ").split(' ')
-            test_text = ["Send an email with information about my project to my group members"]
-                         # "Email alemen-6@student.ltu.se saying Hello world!.",
-                         # "Send email to my friend, I'm about 15 minutes late for school."]
-            print("input:", test_text)
+            for i in range(len(examples)):
+                print("\nExample %s:" % i)
 
-            # Preprocess
-            test_vectors = extract_word_embeddings(nlp, keywords, test_text)
-            max_len = 0
-            for v in test_vectors:
-                if len(v) > max_len:
-                    max_len = len(v)
-            print("Max length:", max_len)
+                test_text = examples[i]
+                print("input:", test_text)
 
-            for v in test_vectors:
-                while len(v) < max_len:
-                    v.append(keywords["<PAD>"])
+                # Preprocess
+                test_vector = extract_word_embeddings(nlp, keywords, [test_text])
+                pad_vector = extract_word_embeddings(nlp, keywords, ["<PAD> " * num_steps])
+                max_len = 0
+                for v in test_vector:
+                    if len(v) > max_len:
+                        max_len = len(v)
 
-            pad_text = ["<START>" + " <PAD>"*(max_len - 1)]
-                        # "<START>" + " <PAD>"*(max_len - 1),
-                        # "<START>" + " <PAD>"*(max_len - 1)]
-            pad_vectors = extract_word_embeddings(nlp, keywords, pad_text)
+                for v in test_vector:
+                    while len(v) < max_len:
+                        v.append(keywords["<PAD>"])
+                test_vector = correct_vector_length(test_vector, num_steps, keywords["<PAD>"])
+                # Create tensors for pytorch
+                inputs = torch.FloatTensor(test_vector).to(device)
+                hidden = torch.FloatTensor(torch.zeros(1, len(test_vector), hidden_size)).to(device)
 
-            test_vectors = correct_vector_length(test_vectors, num_steps, keywords["<PAD>"])
-            pad_vectors = correct_vector_length(pad_vectors, num_steps, keywords["<PAD>"])
-
-            # Create tensors for pytorch
-            inputs = torch.FloatTensor(test_vectors).to(device)
-            hidden = torch.FloatTensor(torch.zeros(1, len(test_vectors), hidden_size)).to(device)
-            padding = torch.FloatTensor(pad_vectors).to(device)
-
-            print("output: ", end='')
-            found_end_token = False;
-            tries = 1
-            while not found_end_token and tries > 0:
-                tries -= 1
-                outputs = model.forward_without_teacher(inputs, hidden).cpu()
-
-                # Next it remove start
-                # pad_text = "<PAD>"
-                # pad_vectors = extract_word_embeddings(nlp, keywords, [pad_text])
-                # pad_vectors = correct_vector_length(pad_vectors, num_steps, keywords["<PAD>"])
-                # padding = torch.FloatTensor([pad_vectors[0]]).to(device)
-
-                for v in outputs:
-                    keys, _, _ = nlp.vocab.vectors.most_similar(v, n=10)
-                    for k in keys:
-                        result = ""
-                        text = nlp.vocab[k[0]].text
-                        if text == "<END>":
-                            found_end_token = True;
-                            break;
-                        for i in range(10):
-                            result += nlp.vocab[k[i]].text + ", "
-                        print("- ", result.encode("utf-8"))
-            print("")
+                print("output: ", end='')
+                found_end_token = False;
+                tries = 1
+                result = ""
+                inputs_word = keywords["<START>"];
+                while not found_end_token and tries > 0:
+                    tries -= 1
+                    outputs = model.forward_without_teacher(inputs, hidden, inputs_word).cpu()
+                    input_word = outputs[num_steps - 1]
+                    inputs = torch.FloatTensor(pad_vector).to(device) # no more input
+                    for v in outputs:
+                        if found_end_token: break;
+                        keys, _, _ = nlp.vocab.vectors.most_similar(v)
+                        for k in keys:
+                            text = nlp.vocab[k[0]].text
+                            if text == "<END>":
+                                found_end_token = True;
+                                break;
+                            result += text + " "
+                print(result.encode("utf-8"))
+                    
+                print("")
     print("Exiting the program")
