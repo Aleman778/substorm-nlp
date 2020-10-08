@@ -1,4 +1,5 @@
 import spacy
+from spacy.vocab import Vocab
 import numpy as np
 import random
 import torch
@@ -46,7 +47,7 @@ class Seq2Seq(nn.Module):
             dec_inputs = outputs[i].unsqueeze(0)
         return outputs
 
-def extract_word_embeddings(nlp, keywords, text):
+def extract_word_embeddings(nlp, keywords, text, vocab_subset=False):
     result = []
     for entry in text:
         doc = nlp(entry)
@@ -64,6 +65,8 @@ def extract_word_embeddings(nlp, keywords, text):
             if not doc[i].has_vector:
                 nlp.vocab.set_vector(doc[i].text, np.random.uniform(-10, 10, (300,)))
                 print(doc[i].text, "has no vector")
+            if vocab_subset:
+                vocab_subset.set_vector(doc[i].text, doc[i].vector)
             vectors.append(doc[i].vector)
             i += 1
         result.append(vectors)
@@ -100,6 +103,7 @@ if __name__ == "__main__":
     
     # Seting up the dataset
     nlp = spacy.load("en_core_web_md")
+    vocab_subset = Vocab() # store local vocabulary to improve output
     dataset_inputs  = ["Email alemen-6@student.ltu.se saying Hello world.",
                        "Send email to my friend, I'm sick I cannot come to school.",
                        "I am about 15 minutes late for work, send email to my colleagues.",
@@ -122,8 +126,8 @@ if __name__ == "__main__":
                 "<PAD>": np.random.uniform(-1, 1, (300,))}
     for word, vector in keywords.items():
         nlp.vocab.set_vector(word, vector)
+        vocab_subset.set_vector(word, vector)
     # TODO(alexander): These needs to be stored so we can interpret future uses of this model
-
 
     # Separate dataset outputs (inputs to decoder) and its target
     dataset_targets = []
@@ -202,7 +206,7 @@ if __name__ == "__main__":
                 print("input:", test_text)
 
                 # Preprocess
-                test_vector = extract_word_embeddings(nlp, keywords, [test_text])
+                test_vector = extract_word_embeddings(nlp, keywords, [test_text], vocab_subset)
                 pad_vector = extract_word_embeddings(nlp, keywords, ["<PAD> " * num_steps])
                 max_len = 0
                 for v in test_vector:
@@ -229,7 +233,7 @@ if __name__ == "__main__":
                     inputs = torch.FloatTensor(pad_vector).to(device) # no more input
                     for v in outputs:
                         if found_end_token: break;
-                        keys, _, _ = nlp.vocab.vectors.most_similar(v)
+                        keys, _, _ = vocab_subset.vectors.most_similar(v)
                         for k in keys:
                             text = nlp.vocab[k[0]].text
                             if text == "<END>":
